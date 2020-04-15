@@ -47,7 +47,7 @@ class FastRCNNConvFCHead(nn.Module):
 
         self._output_size = (input_shape.channels, input_shape.height, input_shape.width)
 
-        self.conv_norm_relus = []
+        self.conv_norm_relus = nn.ModuleList()
         for k in range(num_conv):
             conv = Conv2d(
                 self._output_size[0],
@@ -62,9 +62,10 @@ class FastRCNNConvFCHead(nn.Module):
             self.conv_norm_relus.append(conv)
             self._output_size = (conv_dim, self._output_size[1], self._output_size[2])
 
-        self.fcs = []
+        self.fcs = nn.ModuleList()
+        self.num_fcs = num_fc
         for k in range(num_fc):
-            fc = Linear(np.prod(self._output_size), fc_dim)
+            fc = Linear(int(np.prod(self._output_size)), fc_dim)
             self.add_module("fc{}".format(k + 1), fc)
             self.fcs.append(fc)
             self._output_size = fc_dim
@@ -88,7 +89,7 @@ class FastRCNNConvFCHead(nn.Module):
     def forward(self, x):
         for layer in self.conv_norm_relus:
             x = layer(x)
-        if len(self.fcs):
+        if self.num_fcs:
             if x.dim() > 2:
                 x = torch.flatten(x, start_dim=1)
             for layer in self.fcs:

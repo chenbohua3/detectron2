@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from detectron2.layers import ShapeSpec
-from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
+from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou, JittableInstances
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.registry import Registry
 
@@ -493,6 +493,8 @@ class StandardROIHeads(ROIHeads):
         # fmt: off
         self.mask_on           = cfg.MODEL.MASK_ON
         if not self.mask_on:
+            self.mask_pooler = None
+            self.mask_head = None
             return
         pooler_resolution = cfg.MODEL.ROI_MASK_HEAD.POOLER_RESOLUTION
         pooler_scales     = tuple(1.0 / input_shape[k].stride for k in self.in_features)
@@ -516,6 +518,8 @@ class StandardROIHeads(ROIHeads):
         # fmt: off
         self.keypoint_on  = cfg.MODEL.KEYPOINT_ON
         if not self.keypoint_on:
+            self.keypoint_pooler = None
+            self.keypoint_head = None
             return
         pooler_resolution = cfg.MODEL.ROI_KEYPOINT_HEAD.POOLER_RESOLUTION
         pooler_scales     = tuple(1.0 / input_shape[k].stride for k in self.in_features)  # noqa
@@ -696,5 +700,62 @@ class StandardROIHeads(ROIHeads):
             return self.keypoint_head(keypoint_features, proposals)
         else:
             pred_boxes = [x.pred_boxes for x in instances]
+            keypoint_features = self.keypoint_pooler(features, pred_boxes)
+            return self.keypoint_head(keypoint_features, instances)
+
+    def forward_with_given_boxes_jit(
+        self, features: Dict[str, torch.Tensor], instances: List[JittableInstances]
+    ) -> List[JittableInstances]:
+
+        assert torch.jit.is_scripting()
+        assert instances[0].pred_boxes is not None and instances[0].pred_classes is not None
+
+        instances = self._forward_mask_jit(features, instances)
+        assert instances is not None
+        instances = self._forward_keypoint_jit(features, instances)
+        assert instances is not None
+        return instances
+
+    def _forward_box_jit(
+        self, features: Dict[str, torch.Tensor], proposals: List[JittableInstances]):
+
+        features = [features[f] for f in self.in_features]
+        proposal_boxes: List[Boxes] = []
+        for x in proposals:
+            proposal_box = x.proposal_boxes
+            if proposal_box is not None:
+                proposal_boxes.append(proposal_box)
+        box_features = self.box_pooler(features, proposal_boxes)
+        box_features = self.box_head(box_features)
+        predictions = self.box_predictor(box_features)
+
+        pred_instances, _ = self.box_predictor.inference(predictions, proposals)
+        return pred_instances
+
+    def _forward_mask_jit(
+        self, features: Dict[str, torch.Tensor], instances: List[JittableInstances]
+    ):
+
+        if not self.mask_on:
+            return instances
+
+        features = [features[f] for f in self.in_features]
+
+        pred_boxes = [x.pred_boxes for x in instances]
+        if self.mask_pooler is not None and self.mask_head is not None:
+            mask_features = self.mask_pooler(features, pred_boxes)
+            return self.mask_head(mask_features, instances)
+
+    def _forward_keypoint_jit(
+        self, features: Dict[str, torch.Tensor], instances: List[JittableInstances]
+    ):
+
+        if not self.keypoint_on:
+            return instances
+
+        features = [features[f] for f in self.in_features]
+
+        pred_boxes = [x.pred_boxes for x in instances]
+        if self.keypoint_pooler is not None and self.keypoint_head is not None:
             keypoint_features = self.keypoint_pooler(features, pred_boxes)
             return self.keypoint_head(keypoint_features, instances)

@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from enum import IntEnum, unique
-from typing import Iterator, List, Tuple, Union
+from typing import Iterator, List, Tuple, Union, Any
 import torch
 
 _RawBoxType = Union[List[float], Tuple[float, ...], torch.Tensor, np.ndarray]
@@ -119,7 +119,7 @@ class BoxMode(IntEnum):
         else:
             return arr
 
-
+@torch.jit.script
 class Boxes:
     """
     This structure stores a list of boxes as a Nx4 torch.Tensor.
@@ -149,7 +149,7 @@ class Boxes:
 
         self.tensor = tensor
 
-    def clone(self) -> "Boxes":
+    def clone(self):
         """
         Clone the Boxes.
 
@@ -158,7 +158,7 @@ class Boxes:
         """
         return Boxes(self.tensor.clone())
 
-    def to(self, device: str) -> "Boxes":
+    def to(self, device: str):
         return Boxes(self.tensor.to(device))
 
     def area(self) -> torch.Tensor:
@@ -172,7 +172,7 @@ class Boxes:
         area = (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
         return area
 
-    def clip(self, box_size: BoxSizeType) -> None:
+    def clip(self, box_size: Tuple[int, int]) -> None:
         """
         Clip (in place) the boxes by limiting x coordinates to the range [0, width]
         and y coordinates to the range [0, height].
@@ -203,7 +203,15 @@ class Boxes:
         keep = (widths > threshold) & (heights > threshold)
         return keep
 
-    def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "Boxes":
+    @torch.jit._overload_method
+    def __getitem__(self, item: int):
+        pass
+
+    @torch.jit._overload_method
+    def __getitem__(self, item: torch.Tensor):
+        pass
+
+    def __getitem__(self, item: torch.Tensor):
         """
         Returns:
             Boxes: Create a new :class:`Boxes` by indexing.
@@ -220,9 +228,11 @@ class Boxes:
         """
         if isinstance(item, int):
             return Boxes(self.tensor[item].view(1, -1))
+
         b = self.tensor[item]
         assert b.dim() == 2, "Indexing on Boxes with {} failed to return a matrix!".format(item)
         return Boxes(b)
+
 
     def __len__(self) -> int:
         return self.tensor.shape[0]
@@ -230,7 +240,7 @@ class Boxes:
     def __repr__(self) -> str:
         return "Boxes(" + str(self.tensor) + ")"
 
-    def inside_box(self, box_size: BoxSizeType, boundary_threshold: int = 0) -> torch.Tensor:
+    def inside_box(self, box_size: Tuple[int, int], boundary_threshold: int = 0) -> torch.Tensor:
         """
         Args:
             box_size (height, width): Size of the reference box.
@@ -263,34 +273,37 @@ class Boxes:
         self.tensor[:, 0::2] *= scale_x
         self.tensor[:, 1::2] *= scale_y
 
-    @staticmethod
-    def cat(boxes_list: List["Boxes"]) -> "Boxes":
-        """
-        Concatenates a list of Boxes into a single Boxes
-
-        Arguments:
-            boxes_list (list[Boxes])
-
-        Returns:
-            Boxes: the concatenated Boxes
-        """
-        assert isinstance(boxes_list, (list, tuple))
-        assert len(boxes_list) > 0
-        assert all(isinstance(box, Boxes) for box in boxes_list)
-
-        # use torch.cat (v.s. layers.cat) so the returned boxes never share storage with input
-        cat_boxes = type(boxes_list[0])(torch.cat([b.tensor for b in boxes_list], dim=0))
-        return cat_boxes
-
     @property
     def device(self) -> torch.device:
         return self.tensor.device
 
-    def __iter__(self) -> Iterator[torch.Tensor]:
-        """
-        Yield a box as a Tensor of shape (4,) at a time.
-        """
-        yield from self.tensor
+    # def __iter__(self) -> Iterator[torch.Tensor]:
+    #     """
+    #     Yield a box as a Tensor of shape (4,) at a time.
+    #     """
+    #     yield from self.tensor
+
+
+def cat_boxes(boxes_list: List[Boxes]):
+    """
+    Concatenates a list of Boxes into a single Boxes
+
+    Arguments:
+        boxes_list (list[Boxes])
+
+    Returns:
+        Boxes: the concatenated Boxes
+    """
+    assert isinstance(boxes_list, (list, tuple))
+    assert len(boxes_list) > 0
+    # assert all(isinstance(box, Boxes) for box in boxes_list)
+    for box in boxes_list:
+        assert  isinstance(box, Boxes)
+
+    # use torch.cat (v.s. layers.cat) so the returned boxes never share storage with input
+    # cat_boxes = type(boxes_list[0])(torch.cat([b.tensor for b in boxes_list], dim=0))
+    tensors = torch.cat([b.tensor for b in boxes_list], dim=0)
+    return Boxes(tensors)
 
 
 # implementation from https://github.com/kuangliu/torchcv/blob/master/torchcv/utils/box.py
@@ -319,7 +332,7 @@ def pairwise_iou(boxes1: Boxes, boxes2: Boxes) -> torch.Tensor:
 
     width_height.clamp_(min=0)  # [N,M,2]
     inter = width_height.prod(dim=2)  # [N,M]
-    del width_height
+    # del width_height
 
     # handle empty boxes
     iou = torch.where(

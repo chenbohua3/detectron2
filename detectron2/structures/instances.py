@@ -1,8 +1,38 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import itertools
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
 import torch
 
+from detectron2.structures import Boxes, cat_boxes
+from .densepose_structure import DensePoseOutput
+
+@torch.jit.script
+class JittableInstances:
+    def __init__(self,
+                 image_size: Tuple[int, int],
+                 gt_boxes: Optional[List[Boxes]]=None,
+                 proposal_boxes: Optional[Boxes]=None,
+                 objectness_logits: Optional[torch.Tensor]=None,
+                 pred_boxes: Optional[Boxes]=None,
+                 scores: Optional[torch.Tensor]=None,
+                 pred_classes: Optional[torch.Tensor]=None,
+                 pred_densepose: Optional[DensePoseOutput]=None):
+        self._image_size = image_size
+        self.gt_boxes = gt_boxes
+        self.proposal_boxes = proposal_boxes
+        self.objectness_logits = objectness_logits
+        self.pred_boxes = pred_boxes
+        self.scores = scores
+        self.pred_classes = pred_classes
+        self.pred_densepose = pred_densepose
+
+    @property
+    def image_size(self) -> Tuple[int, int]:
+        """
+        Returns:
+            tuple: height, width
+        """
+        return self._image_size
 
 class Instances:
     """
@@ -167,8 +197,9 @@ class Instances:
                 values = torch.cat(values, dim=0)
             elif isinstance(v0, list):
                 values = list(itertools.chain(*values))
-            elif hasattr(type(v0), "cat"):
-                values = type(v0).cat(values)
+            elif isinstance(v0, Boxes):
+                values = cat_boxes(values)
+            # todo: add rotate box
             else:
                 raise ValueError("Unsupported type {} for concatenation".format(type(v0)))
             ret.set(k, values)

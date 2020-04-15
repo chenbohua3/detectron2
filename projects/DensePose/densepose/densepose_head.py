@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import math
+from typing import Dict, Tuple, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 import fvcore.nn.weight_init as weight_init
@@ -12,7 +13,7 @@ from detectron2.layers import Conv2d, ConvTranspose2d, interpolate
 from detectron2.structures.boxes import matched_boxlist_iou
 from detectron2.utils.registry import Registry
 
-from .structures import DensePoseOutput
+from detectron2.structures import DensePoseOutput, JittableInstances
 
 ROI_DENSEPOSE_HEAD_REGISTRY = Registry("ROI_DENSEPOSE_HEAD")
 
@@ -92,11 +93,13 @@ class DensePoseDeepLabHead(nn.Module):
         self.ASPP = ASPP(input_channels, [6, 12, 56], n_channels)  # 6, 12, 56
         self.add_module("ASPP", self.ASPP)
 
+        self.NLBlock = None
         if self.use_nonlocal:
             self.NLBlock = NONLocalBlock2D(input_channels, bn_layer=True)
             self.add_module("NLBlock", self.NLBlock)
         # weight_init.c2_msra_fill(self.ASPP)
 
+        self.stacked_convs = nn.ModuleList()
         for i in range(self.n_stacked_convs):
             norm_module = nn.GroupNorm(32, hidden_dim) if norm == "GN" else None
             layer = Conv2d(
@@ -118,12 +121,11 @@ class DensePoseDeepLabHead(nn.Module):
     def forward(self, features):
         x0 = features
         x = self.ASPP(x0)
-        if self.use_nonlocal:
+        if self.NLBlock is not None:
             x = self.NLBlock(x)
         output = x
-        for i in range(self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
+        for conv in self.stacked_convs:
+            x = conv(x)
             x = F.relu(x)
             output = x
         return output
@@ -148,9 +150,10 @@ class ASPPConv(nn.Sequential):
         super(ASPPConv, self).__init__(*modules)
 
 
-class ASPPPooling(nn.Sequential):
+class ASPPPooling(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(ASPPPooling, self).__init__(
+        super().__init__()
+        self.layers = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(in_channels, out_channels, 1, bias=False),
             nn.GroupNorm(32, out_channels),
@@ -159,7 +162,7 @@ class ASPPPooling(nn.Sequential):
 
     def forward(self, x):
         size = x.shape[-2:]
-        x = super(ASPPPooling, self).forward(x)
+        x = self.layers(x)
         return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 
@@ -332,10 +335,12 @@ class DensePoseV1ConvXHead(nn.Module):
         # fmt: on
         pad_size = kernel_size // 2
         n_channels = input_channels
+        self.convs = nn.ModuleList()
         for i in range(self.n_stacked_convs):
             layer = Conv2d(n_channels, hidden_dim, kernel_size, stride=1, padding=pad_size)
             layer_name = self._get_layer_name(i)
             self.add_module(layer_name, layer)
+            self.convs.append(layer)
             n_channels = hidden_dim
         self.n_out_channels = n_channels
         initialize_module_params(self)
@@ -343,14 +348,13 @@ class DensePoseV1ConvXHead(nn.Module):
     def forward(self, features):
         x = features
         output = x
-        for i in range(self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
+        for layer in self.convs:
+            x = layer(x)
             x = F.relu(x)
             output = x
         return output
 
-    def _get_layer_name(self, i):
+    def _get_layer_name(self, i: int) -> str:
         layer_name = "body_conv_fcn{}".format(i + 1)
         return layer_name
 
@@ -380,27 +384,32 @@ class DensePosePredictor(nn.Module):
         self._initialize_confidence_estimation_layers(cfg, self.confidence_model_cfg, dim_in)
         initialize_module_params(self)
 
+        # it's better to decouple custom data structure from forward process
+        self.uv_confidence_enabled = self.confidence_model_cfg.uv_confidence.enabled
+        self.uv_confidence_type = self.confidence_model_cfg.uv_confidence.type.value
+
+
+    def _interp2d(self, input):
+        return interpolate(
+            input, scale_factor=float(self.scale_factor), mode="bilinear", align_corners=False
+        )
+
     def forward(self, head_outputs):
         ann_index_lowres = self.ann_index_lowres(head_outputs)
         index_uv_lowres = self.index_uv_lowres(head_outputs)
         u_lowres = self.u_lowres(head_outputs)
         v_lowres = self.v_lowres(head_outputs)
 
-        def interp2d(input):
-            return interpolate(
-                input, scale_factor=self.scale_factor, mode="bilinear", align_corners=False
-            )
-
-        ann_index = interp2d(ann_index_lowres)
-        index_uv = interp2d(index_uv_lowres)
-        u = interp2d(u_lowres)
-        v = interp2d(v_lowres)
+        ann_index = self._interp2d(ann_index_lowres)
+        index_uv = self._interp2d(index_uv_lowres)
+        u = self._interp2d(u_lowres)
+        v = self._interp2d(v_lowres)
         (
             (sigma_1, sigma_2, kappa_u, kappa_v),
             (sigma_1_lowres, sigma_2_lowres, kappa_u_lowres, kappa_v_lowres),
             (ann_index, index_uv),
         ) = self._forward_confidence_estimation_layers(
-            self.confidence_model_cfg, head_outputs, interp2d, ann_index, index_uv
+            head_outputs, ann_index, index_uv
         )
         return (
             (ann_index, index_uv, u, v),
@@ -414,6 +423,7 @@ class DensePosePredictor(nn.Module):
     ):
         dim_out_patches = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_PATCHES + 1
         kernel_size = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECONV_KERNEL
+        self.sigma_2_lowres = self.sigma_2_lowres = self.kappa_u_lowres = self.kappa_v_lowres = None
         if confidence_model_cfg.uv_confidence.enabled:
             if confidence_model_cfg.uv_confidence.type == DensePoseUVConfidenceType.IID_ISO:
                 self.sigma_2_lowres = ConvTranspose2d(
@@ -435,24 +445,26 @@ class DensePosePredictor(nn.Module):
                 )
 
     def _forward_confidence_estimation_layers(
-        self, confidence_model_cfg, head_outputs, interp2d, ann_index, index_uv
+        self, head_outputs, ann_index, index_uv
     ):
         sigma_1, sigma_2, kappa_u, kappa_v = None, None, None, None
         sigma_1_lowres, sigma_2_lowres, kappa_u_lowres, kappa_v_lowres = None, None, None, None
-        if confidence_model_cfg.uv_confidence.enabled:
-            if confidence_model_cfg.uv_confidence.type == DensePoseUVConfidenceType.IID_ISO:
-                sigma_2_lowres = self.sigma_2_lowres(head_outputs)
-                sigma_2 = interp2d(sigma_2_lowres)
-            elif confidence_model_cfg.uv_confidence.type == DensePoseUVConfidenceType.INDEP_ANISO:
-                sigma_2_lowres = self.sigma_2_lowres(head_outputs)
-                kappa_u_lowres = self.kappa_u_lowres(head_outputs)
-                kappa_v_lowres = self.kappa_v_lowres(head_outputs)
-                sigma_2 = interp2d(sigma_2_lowres)
-                kappa_u = interp2d(kappa_u_lowres)
-                kappa_v = interp2d(kappa_v_lowres)
+        if self.uv_confidence_enabled:
+            if self.uv_confidence_type == "iid_iso":
+                if self.sigma_2_lowres is not None:
+                    sigma_2_lowres = self.sigma_2_lowres(head_outputs)
+                    sigma_2 = self._interp2d(sigma_2_lowres)
+            elif self.uv_confidence_type == "indep_aniso":
+                if self.sigma_2_lowres is not None and self.kappa_u_lowres is not None and self.kappa_v_lowres is not None:
+                    sigma_2_lowres = self.sigma_2_lowres(head_outputs)
+                    kappa_u_lowres = self.kappa_u_lowres(head_outputs)
+                    kappa_v_lowres = self.kappa_v_lowres(head_outputs)
+                    sigma_2 = self._interp2d(sigma_2_lowres)
+                    kappa_u = self._interp2d(kappa_u_lowres)
+                    kappa_v = self._interp2d(kappa_v_lowres)
             else:
                 raise ValueError(
-                    f"Unknown confidence model type: {confidence_model_cfg.confidence_model_type}"
+                    f"Unknown confidence model type: {self.uv_confidence_type}"
                 )
         return (
             (sigma_1, sigma_2, kappa_u, kappa_v),
@@ -516,7 +528,9 @@ def build_densepose_data_filter(cfg):
     return dp_filter
 
 
-def densepose_inference(densepose_outputs, densepose_confidences, detections):
+def densepose_inference(densepose_outputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+                        densepose_confidences: Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]],
+                        detections: List[JittableInstances]):
     """
     Infer dense pose estimate based on outputs from the DensePose head
     and detections. The estimate for each detection instance is stored in its
@@ -554,17 +568,21 @@ def densepose_inference(densepose_outputs, densepose_confidences, detections):
     sigma_1, sigma_2, kappa_u, kappa_v = densepose_confidences
     k = 0
     for detection in detections:
-        n_i = len(detection)
+        if not torch.jit.is_scripting():
+            n_i = len(detection)
+        else:
+            boxes = detection.pred_boxes
+            assert boxes is not None
+            n_i = boxes.tensor.shape[0]
         s_i = s[k : k + n_i]
         index_uv_i = index_uv[k : k + n_i]
         u_i = u[k : k + n_i]
         v_i = v[k : k + n_i]
-        _local_vars = locals()
-        confidences = {
-            name: _local_vars[name]
-            for name in ("sigma_1", "sigma_2", "kappa_u", "kappa_v")
-            if _local_vars.get(name) is not None
-        }
+        confidences: Dict[str, torch.Tensor] = {}
+        if sigma_1 is not None: confidences["sigma_1"] = sigma_1
+        if sigma_2 is not None: confidences["sigma_2"] = sigma_2
+        if kappa_u is not None: confidences["kappa_u"] = kappa_u
+        if kappa_v is not None: confidences["kappa_v"] = kappa_v
         densepose_output_i = DensePoseOutput(s_i, index_uv_i, u_i, v_i, confidences)
         detection.pred_densepose = densepose_output_i
         k += n_i

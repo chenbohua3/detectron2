@@ -163,8 +163,10 @@ class DefaultPredictor:
         self.model = build_model(self.cfg)
         self.model.eval()
         self.metadata = MetadataCatalog.get(cfg.DATASETS.TEST[0])
-
-        checkpointer = DetectionCheckpointer(self.model)
+        if hasattr(self.model, 'model_inference'):
+            checkpointer = DetectionCheckpointer(self.model.model_inference)
+        else:
+            checkpointer = DetectionCheckpointer(self.model)
         checkpointer.load(cfg.MODEL.WEIGHTS)
 
         self.transform_gen = T.ResizeShortestEdge(

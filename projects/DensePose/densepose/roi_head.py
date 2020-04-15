@@ -2,7 +2,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 
 import numpy as np
-from typing import Dict
+from typing import Dict, List, Optional
 import fvcore.nn.weight_init as weight_init
 import torch
 import torch.nn as nn
@@ -12,6 +12,7 @@ from detectron2.layers import Conv2d, ShapeSpec, get_norm
 from detectron2.modeling import ROI_HEADS_REGISTRY, StandardROIHeads
 from detectron2.modeling.poolers import ROIPooler
 from detectron2.modeling.roi_heads import select_foreground_proposals
+from detectron2.structures import JittableInstances, Boxes, ImageList
 
 from .densepose_head import (
     build_densepose_data_filter,
@@ -42,7 +43,7 @@ class Decoder(nn.Module):
         norm                  = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_NORM
         # fmt: on
 
-        self.scale_heads = []
+        self.scale_heads = nn.ModuleList()
         for in_feature in self.in_features:
             head_ops = []
             head_length = max(
@@ -70,12 +71,10 @@ class Decoder(nn.Module):
         self.predictor = Conv2d(conv_dims, num_classes, kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
 
-    def forward(self, features):
-        for i, _ in enumerate(self.in_features):
-            if i == 0:
-                x = self.scale_heads[i](features[i])
-            else:
-                x = x + self.scale_heads[i](features[i])
+    def forward(self, features: List[torch.Tensor]):
+        x = torch.sum(torch.stack([
+            head(features[i]) for i, head in enumerate(self.scale_heads)
+        ]), dim=0)
         x = self.predictor(x)
         return x
 
@@ -181,12 +180,16 @@ class DensePoseROIHeads(StandardROIHeads):
             densepose_inference(densepose_outputs, confidences, instances)
             return instances
 
-    def forward(self, images, features, proposals, targets=None):
-        instances, losses = super().forward(images, features, proposals, targets)
-        del targets, images
+    def forward(self, images: ImageList, features: Dict[str, torch.Tensor], proposals: List[JittableInstances], targets: Optional[List[JittableInstances]]=None):
+        if not torch.jit.is_scripting():
+            instances, losses = super().forward(images, features, proposals, targets)
+            del targets, images
 
-        if self.training:
-            losses.update(self._forward_densepose(features, instances))
+            if self.training:
+                losses.update(self._forward_densepose(features, instances))
+        else:
+            instances = self.forward_jit(features, proposals, targets)
+            losses = {}
         return instances, losses
 
     def forward_with_given_boxes(self, features, instances):
@@ -211,3 +214,48 @@ class DensePoseROIHeads(StandardROIHeads):
         instances = super().forward_with_given_boxes(features, instances)
         instances = self._forward_densepose(features, instances)
         return instances
+
+    def _forward_densepose_jit(self, features: Dict[str, torch.Tensor], instances: List[JittableInstances]):
+
+        if not self.densepose_on:
+            return instances
+
+        features = [features[f] for f in self.in_features]
+
+        pred_boxes: List[Boxes] = []
+        for x in instances:
+            b = x.pred_boxes
+            if b is not None:
+                pred_boxes.append(b)
+
+        if self.use_decoder:
+            features = [self.decoder(features)]
+
+        features_dp = self.densepose_pooler(features, pred_boxes)
+
+        if len(features_dp) > 0:
+            densepose_head_outputs = self.densepose_head(features_dp)
+            densepose_outputs, _, confidences, _ = self.densepose_predictor(
+                densepose_head_outputs
+            )
+        else:
+            # If no detection occurred instances
+            # set densepose_outputs to empty tensors
+            empty_tensor = torch.zeros(size=(0, 0, 0, 0), device=features_dp.device)
+            densepose_outputs = (empty_tensor, empty_tensor, empty_tensor, empty_tensor)
+            confidences = (empty_tensor, empty_tensor, empty_tensor, empty_tensor)
+
+        densepose_inference(densepose_outputs, confidences, instances)
+        return instances
+
+
+    def forward_jit(self, features: Dict[str, torch.Tensor], proposals: Optional[List[JittableInstances]]=None, targets: Optional[List[JittableInstances]]=None):
+        if targets is not None:
+            pred_instances = targets
+        else:
+            assert proposals is not None
+            pred_instances = self._forward_box_jit(features, proposals)
+        pred_instances = self.forward_with_given_boxes_jit(features, pred_instances)
+
+        pred_instances = self._forward_densepose_jit(features, pred_instances)
+        return pred_instances

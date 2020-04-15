@@ -1,10 +1,11 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import logging
 import numpy as np
+from typing import List, Optional
 import torch
 from torch import nn
 
-from detectron2.structures import ImageList
+from detectron2.structures import ImageList, build_imagelist_from_tensors, JittableInstances
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.logger import log_first_n
 
@@ -16,6 +17,36 @@ from .build import META_ARCH_REGISTRY
 
 __all__ = ["GeneralizedRCNN", "ProposalNetwork"]
 
+
+class ModelInference(nn.Module):
+    def __init__(self, backbone, proposal_generator, roi_heads, device: str):
+        super().__init__()
+        self.backbone = backbone
+        self.proposal_generator = proposal_generator
+        self.roi_heads = roi_heads
+        self.device = device
+
+    def forward(self,
+                batched_proposals: Optional[List[JittableInstances]],
+                images: ImageList,
+                detected_instances: Optional[List[JittableInstances]]):
+
+        features = self.backbone(images.tensor)
+
+        if detected_instances is None:
+            if self.proposal_generator is not None:
+                proposals, _ = self.proposal_generator(images, features, None)
+            else:
+                assert batched_proposals is not None
+                proposals = batched_proposals
+
+            results, _ = self.roi_heads(images, features, proposals, None)
+        else:
+            if not torch.jit.is_scripting():
+                results = self.roi_heads.forward_with_given_boxes(features, detected_instances)
+            else:
+                results = self.roi_heads.forward_jit(features, targets=detected_instances)
+        return results
 
 @META_ARCH_REGISTRY.register()
 class GeneralizedRCNN(nn.Module):
@@ -30,9 +61,10 @@ class GeneralizedRCNN(nn.Module):
         super().__init__()
 
         self.device = torch.device(cfg.MODEL.DEVICE)
-        self.backbone = build_backbone(cfg)
-        self.proposal_generator = build_proposal_generator(cfg, self.backbone.output_shape())
-        self.roi_heads = build_roi_heads(cfg, self.backbone.output_shape())
+        backbone = build_backbone(cfg)
+        proposal_generator = build_proposal_generator(cfg, backbone.output_shape())
+        roi_heads = build_roi_heads(cfg, backbone.output_shape())
+        self.model_inference = ModelInference(backbone, proposal_generator, roi_heads, cfg.MODEL.DEVICE)
         self.vis_period = cfg.VIS_PERIOD
         self.input_format = cfg.INPUT.FORMAT
 
@@ -118,16 +150,16 @@ class GeneralizedRCNN(nn.Module):
         else:
             gt_instances = None
 
-        features = self.backbone(images.tensor)
+        features = self.model_inference.backbone(images.tensor)
 
-        if self.proposal_generator:
-            proposals, proposal_losses = self.proposal_generator(images, features, gt_instances)
+        if self.model_inference.proposal_generator:
+            proposals, proposal_losses = self.model_inference.proposal_generator(images, features, gt_instances)
         else:
             assert "proposals" in batched_inputs[0]
             proposals = [x["proposals"].to(self.device) for x in batched_inputs]
             proposal_losses = {}
 
-        _, detector_losses = self.roi_heads(images, features, proposals, gt_instances)
+        _, detector_losses = self.model_inference.roi_heads(images, features, proposals, gt_instances)
         if self.vis_period > 0:
             storage = get_event_storage()
             if storage.iter % self.vis_period == 0:
@@ -158,19 +190,16 @@ class GeneralizedRCNN(nn.Module):
         assert not self.training
 
         images = self.preprocess_image(batched_inputs)
-        features = self.backbone(images.tensor)
-
         if detected_instances is None:
-            if self.proposal_generator:
-                proposals, _ = self.proposal_generator(images, features, None)
-            else:
+            if self.model_inference.proposal_generator is None:
                 assert "proposals" in batched_inputs[0]
                 proposals = [x["proposals"].to(self.device) for x in batched_inputs]
-
-            results, _ = self.roi_heads(images, features, proposals, None)
+            else:
+                proposals = None
         else:
             detected_instances = [x.to(self.device) for x in detected_instances]
-            results = self.roi_heads.forward_with_given_boxes(features, detected_instances)
+
+        results = self.model_inference(proposals, images, detected_instances)
 
         if do_postprocess:
             return GeneralizedRCNN._postprocess(results, batched_inputs, images.image_sizes)
@@ -183,7 +212,7 @@ class GeneralizedRCNN(nn.Module):
         """
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [self.normalizer(x) for x in images]
-        images = ImageList.from_tensors(images, self.backbone.size_divisibility)
+        images = build_imagelist_from_tensors(images, self.model_inference.backbone.size_divisibility)
         return images
 
     @staticmethod
