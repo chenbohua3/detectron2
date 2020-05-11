@@ -58,7 +58,7 @@ class Decoder(nn.Module):
                     padding=1,
                     bias=not norm,
                     norm=get_norm(norm, conv_dims),
-                    activation=F.relu,
+                    activation=nn.ReLU(),
                 )
                 weight_init.c2_msra_fill(conv)
                 head_ops.append(conv)

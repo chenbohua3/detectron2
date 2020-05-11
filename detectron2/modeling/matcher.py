@@ -48,10 +48,9 @@ class Matcher(object):
         assert thresholds[0] > 0
         thresholds.insert(0, -float("inf"))
         thresholds.append(float("inf"))
-        if not torch.jit.is_scripting():
-            assert all([low <= high for (low, high) in zip(thresholds[:-1], thresholds[1:])])
-            assert all([l in [-1, 0, 1] for l in labels])
-            assert len(labels) == len(thresholds) - 1
+        assert all([low <= high for (low, high) in zip(thresholds[:-1], thresholds[1:])])
+        assert all([l in [-1, 0, 1] for l in labels])
+        assert len(labels) == len(thresholds) - 1
         self.thresholds = thresholds
         self.labels = labels
         self.allow_low_quality_matches = allow_low_quality_matches
@@ -93,8 +92,7 @@ class Matcher(object):
 
         for (l, low, high) in zip(self.labels, self.thresholds[:-1], self.thresholds[1:]):
             low_high = (matched_vals >= low) & (matched_vals < high)
-            match_labels[low_high] = torch.tensor(l, device=match_labels.device, dtype=match_labels.dtype)
-
+            match_labels[low_high].fill_(l)
         if self.allow_low_quality_matches:
             self.set_low_quality_matches_(match_labels, match_quality_matrix)
 

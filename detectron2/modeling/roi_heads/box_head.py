@@ -56,7 +56,7 @@ class FastRCNNConvFCHead(nn.Module):
                 padding=1,
                 bias=not conv_norm,
                 norm=get_norm(conv_norm, conv_dim),
-                activation=F.relu,
+                activation=nn.ReLU(),
             )
             self.add_module("conv{}".format(k + 1), conv)
             self.conv_norm_relus.append(conv)
