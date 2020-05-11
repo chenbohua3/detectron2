@@ -104,7 +104,7 @@ class BasicBlock(ResNetBlockBase):
 
     def forward(self, x):
         out = self.conv1(x)
-        out = F.relu_(out)
+        out = F.relu(out)
         out = self.conv2(out)
 
         if self.shortcut is not None:
@@ -112,8 +112,8 @@ class BasicBlock(ResNetBlockBase):
         else:
             shortcut = x
 
-        out += shortcut
-        out = F.relu_(out)
+        out = out + shortcut
+        out = F.relu(out)
         return out
 
 
@@ -204,10 +204,10 @@ class BottleneckBlock(ResNetBlockBase):
 
     def forward(self, x):
         out = self.conv1(x)
-        out = F.relu_(out)
+        out = F.relu(out)
 
         out = self.conv2(out)
-        out = F.relu_(out)
+        out = F.relu(out)
 
         out = self.conv3(out)
 
@@ -216,8 +216,8 @@ class BottleneckBlock(ResNetBlockBase):
         else:
             shortcut = x
 
-        out += shortcut
-        out = F.relu_(out)
+        out = out + shortcut
+        out = F.relu(out)
         return out
 
 
@@ -311,7 +311,7 @@ class DeformBottleneckBlock(ResNetBlockBase):
 
     def forward(self, x):
         out = self.conv1(x)
-        out = F.relu_(out)
+        out = F.relu(out)
 
         if self.deform_modulated:
             offset_mask = self.conv2_offset(out)
@@ -322,7 +322,7 @@ class DeformBottleneckBlock(ResNetBlockBase):
         else:
             offset = self.conv2_offset(out)
             out = self.conv2(out, offset)
-        out = F.relu_(out)
+        out = F.relu(out)
 
         out = self.conv3(out)
 
@@ -331,8 +331,8 @@ class DeformBottleneckBlock(ResNetBlockBase):
         else:
             shortcut = x
 
-        out += shortcut
-        out = F.relu_(out)
+        out = out + shortcut
+        out = F.relu(out)
         return out
 
 
@@ -379,7 +379,7 @@ class BasicStem(nn.Module):
 
     def forward(self, x):
         x = self.conv1(x)
-        x = F.relu_(x)
+        x = F.relu(x)
         x = F.max_pool2d(x, kernel_size=3, stride=2, padding=1)
         return x
 
