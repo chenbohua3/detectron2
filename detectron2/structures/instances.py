@@ -3,6 +3,7 @@ import itertools
 from typing import Any, Dict, List, Tuple, Union
 import torch
 
+from detectron2.structures import Boxes
 
 class Instances:
     """

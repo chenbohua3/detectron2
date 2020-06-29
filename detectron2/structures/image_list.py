@@ -29,16 +29,20 @@ class ImageList(object):
     def __len__(self) -> int:
         return len(self.image_sizes)
 
-    def __getitem__(self, idx: Union[int, slice]) -> torch.Tensor:
+    def __getitem__(self, idx) -> torch.Tensor:
         """
         Access the individual image in its original size.
+
+        Args:
+            idx: int or slice
 
         Returns:
             Tensor: an image of shape (H, W) or (C_1, ..., C_K, H, W) where K >= 1
         """
         size = self.image_sizes[idx]
-        return self.tensor[idx, ..., : size[0], : size[1]]  # type: ignore
+        return self.tensor[idx, ..., : size[0], : size[1]]
 
+    @torch.jit.unused
     def to(self, *args: Any, **kwargs: Any) -> "ImageList":
         cast_tensor = self.tensor.to(*args, **kwargs)
         return ImageList(cast_tensor, self.image_sizes)
@@ -47,7 +51,9 @@ class ImageList(object):
     def device(self) -> torch.device:
         return self.tensor.device
 
+    # https://github.com/pytorch/pytorch/issues/39308
     @staticmethod
+    @torch.jit.unused
     def from_tensors(
         tensors: Sequence[torch.Tensor], size_divisibility: int = 0, pad_value: float = 0.0
     ) -> "ImageList":
@@ -98,7 +104,7 @@ class ImageList(object):
             # TODO: check whether it's faster for multiple images as well
             image_size = image_sizes[0]
             padding_size = [0, max_size[-1] - image_size[1], 0, max_size[-2] - image_size[0]]
-            if all(x == 0 for x in padding_size):  # https://github.com/pytorch/pytorch/issues/31734
+            if all([x == 0 for x in padding_size]):  # https://github.com/pytorch/pytorch/issues/31734
                 batched_imgs = tensors[0].unsqueeze(0)
             else:
                 padded = F.pad(tensors[0], padding_size, value=pad_value)
