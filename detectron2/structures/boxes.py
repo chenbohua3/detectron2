@@ -274,28 +274,6 @@ class Boxes:
         self.tensor[:, 0::2] *= scale_x
         self.tensor[:, 1::2] *= scale_y
 
-    # classmethod not supported by torchscript. TODO try staticmethod
-    @classmethod
-    @torch.jit.unused
-    def cat(cls, boxes_list):
-        """
-        Concatenates a list of Boxes into a single Boxes
-
-        Arguments:
-            boxes_list (list[Boxes])
-
-        Returns:
-            Boxes: the concatenated Boxes
-        """
-        assert isinstance(boxes_list, (list, tuple))
-        if len(boxes_list) == 0:
-            return cls(torch.empty(0))
-        assert all([isinstance(box, Boxes) for box in boxes_list])
-
-        # use torch.cat (v.s. layers.cat) so the returned boxes never share storage with input
-        cat_boxes = cls(torch.cat([b.tensor for b in boxes_list], dim=0))
-        return cat_boxes
-
     @property
     def device(self) -> torch.device:
         return self.tensor.device
@@ -308,6 +286,30 @@ class Boxes:
         Yield a box as a Tensor of shape (4,) at a time.
         """
         yield from self.tensor
+
+    @torch.jit.unused
+    def __eq__(self, other: "Boxes"):
+        return self.tensor == other.tensor
+
+# https://github.com/pytorch/pytorch/issues/39308
+def cat_box(boxes_list: List["Boxes"]) -> "Boxes":
+    """
+    Concatenates a list of Boxes into a single Boxes
+
+    Arguments:
+        boxes_list (list[Boxes])
+
+    Returns:
+        Boxes: the concatenated Boxes
+    """
+    assert isinstance(boxes_list, (list, tuple))
+    if len(boxes_list) == 0:
+        return Boxes(torch.empty(0))
+    assert all([isinstance(box, Boxes) for box in boxes_list])
+
+    # use torch.cat (v.s. layers.cat) so the returned boxes never share storage with input
+    cat_boxes = Boxes(torch.cat([b.tensor for b in boxes_list], dim=0))
+    return cat_boxes
 
 
 # implementation from https://github.com/kuangliu/torchcv/blob/master/torchcv/utils/box.py

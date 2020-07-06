@@ -46,6 +46,15 @@ def _gen_class():
     #     lines.append(indent(2, "self.{} = val".format(name)))
     #     lines.append("")
 
+    lines.append(indent(1, "def __len__(self) -> int:"))
+    for name, type_ in _fields.items():
+        if type_ == "Tensor" or type_ == "Boxes":
+            lines.append(indent(2, "tmp = self.{}".format(name)))
+            lines.append(indent(2, "if  tmp is not None:"))
+            lines.append(indent(3, "return len(tmp)"))
+    lines.append(indent(2, "raise RuntimeError"))
+    lines.append(indent(2, "return 0"))
+
     return cls_name, os.linesep.join(lines)
 
 

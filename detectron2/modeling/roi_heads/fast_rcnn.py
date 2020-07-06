@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import logging
+from typing import List, Tuple
 import torch
 from fvcore.nn import giou_loss, smooth_l1_loss
 from torch import nn
@@ -9,6 +10,7 @@ from detectron2.config import configurable
 from detectron2.layers import Linear, ShapeSpec, batched_nms, cat, nonzero_tuple
 from detectron2.modeling.box_regression import Box2BoxTransform
 from detectron2.structures import Boxes, Instances
+from detectron2.structures.boxes import cat_box
 from detectron2.utils.events import get_event_storage
 
 __all__ = ["fast_rcnn_inference", "FastRCNNOutputLayers"]
@@ -42,7 +44,12 @@ Naming convention:
 """
 
 
-def fast_rcnn_inference(boxes, scores, image_shapes, score_thresh, nms_thresh, topk_per_image):
+def fast_rcnn_inference(boxes: List[torch.Tensor],
+                        scores: List[torch.Tensor],
+                        image_shapes: List[Tuple[int, int]],
+                        score_thresh: float,
+                        nms_thresh: float,
+                        topk_per_image: int):
     """
     Call `fast_rcnn_inference_single_image` for all images.
 
@@ -78,7 +85,12 @@ def fast_rcnn_inference(boxes, scores, image_shapes, score_thresh, nms_thresh, t
 
 
 def fast_rcnn_inference_single_image(
-    boxes, scores, image_shape, score_thresh, nms_thresh, topk_per_image
+    boxes: torch.Tensor,
+    scores: torch.Tensor,
+    image_shape: Tuple[int, int],
+    score_thresh: float,
+    nms_thresh: float,
+    topk_per_image: int
 ):
     """
     Single-image inference. Return bounding-box detection results by thresholding
@@ -459,7 +471,7 @@ class FastRCNNOutputLayers(nn.Module):
             self.box_reg_loss_weight,
         ).losses()
 
-    def inference(self, predictions, proposals):
+    def inference(self, predictions: Tuple[torch.Tensor, torch.Tensor], proposals: List[Instances]):
         """
         Returns:
             list[Instances]: same as `fast_rcnn_inference`.
@@ -507,7 +519,7 @@ class FastRCNNOutputLayers(nn.Module):
         num_prop_per_image = [len(p) for p in proposals]
         return predict_boxes.split(num_prop_per_image)
 
-    def predict_boxes(self, predictions, proposals):
+    def predict_boxes(self, predictions: Tuple[torch.Tensor, torch.Tensor], proposals: List[Instances]) -> List[torch.Tensor]:
         """
         Returns:
             list[Tensor]: A list of Tensors of predicted class-specific or class-agnostic boxes
@@ -518,14 +530,20 @@ class FastRCNNOutputLayers(nn.Module):
             return []
         _, proposal_deltas = predictions
         num_prop_per_image = [len(p) for p in proposals]
-        proposal_boxes = [p.proposal_boxes for p in proposals]
-        proposal_boxes = proposal_boxes[0].cat(proposal_boxes).tensor
+
+        proposal_boxes: List[Boxes] = []
+        for p in proposals:
+            tmp = p.proposal_boxes
+            if tmp is not None:
+                proposal_boxes.append(tmp)
+        # proposal_boxes = [p.proposal_boxes for p in proposals]
+        proposal_boxes = cat_box(proposal_boxes).tensor
         predict_boxes = self.box2box_transform.apply_deltas(
             proposal_deltas, proposal_boxes
         )  # Nx(KxB)
         return predict_boxes.split(num_prop_per_image)
 
-    def predict_probs(self, predictions, proposals):
+    def predict_probs(self, predictions: Tuple[torch.Tensor, torch.Tensor], proposals: List[Instances]):
         """
         Returns:
             list[Tensor]: A list of Tensors of predicted class probabilities for each image.

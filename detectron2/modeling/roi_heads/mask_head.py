@@ -27,8 +27,8 @@ per-region features.
 The registered object will be called with `obj(cfg, input_shape)`.
 """
 
-
-def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
+@torch.jit.unused
+def mask_rcnn_loss(pred_mask_logits, instances: List[Instances], vis_period: int = 0):
     """
     Compute the mask prediction loss defined in the Mask R-CNN paper.
 
@@ -110,7 +110,7 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     return mask_loss
 
 
-def mask_rcnn_inference(pred_mask_logits, pred_instances):
+def mask_rcnn_inference(pred_mask_logits, pred_instances: List[Instances]):
     """
     Convert pred_mask_logits to estimated foreground probability masks while also
     extracting only the masks for the predicted classes in pred_instances. For each
@@ -139,7 +139,12 @@ def mask_rcnn_inference(pred_mask_logits, pred_instances):
     else:
         # Select masks corresponding to the predicted classes
         num_masks = pred_mask_logits.shape[0]
-        class_pred = cat([i.pred_classes for i in pred_instances])
+        class_pred = []
+        for i in pred_instances:
+            pred = i.pred_classes
+            assert pred is not None
+            class_pred.append(pred)
+        class_pred = cat(class_pred)
         indices = torch.arange(num_masks, device=class_pred.device)
         mask_probs_pred = pred_mask_logits[indices, class_pred][:, None].sigmoid()
     # mask_probs_pred.shape: (B, 1, Hmask, Wmask)
@@ -186,7 +191,7 @@ class BaseMaskRCNNHead(nn.Module):
             A dict of losses in training. The predicted "instances" in inference.
         """
         x = self.layers(x)
-        if self.training:
+        if self.training and not torch.jit.is_scripting():
             return {"loss_mask": mask_rcnn_loss(x, instances, self.vis_period)}
         else:
             mask_rcnn_inference(x, instances)
@@ -222,7 +227,7 @@ class MaskRCNNConvUpsampleHead(BaseMaskRCNNHead):
         super().__init__(**kwargs)
         assert len(conv_dims) >= 1, "conv_dims have to be non-empty!"
 
-        self.conv_norm_relus = []
+        self.conv_norm_relus = nn.ModuleList()
 
         cur_channels = input_shape.channels
         for k, conv_dim in enumerate(conv_dims[:-1]):
@@ -247,8 +252,9 @@ class MaskRCNNConvUpsampleHead(BaseMaskRCNNHead):
 
         self.predictor = Conv2d(cur_channels, num_classes, kernel_size=1, stride=1, padding=0)
 
-        for layer in self.conv_norm_relus + [self.deconv]:
+        for layer in self.conv_norm_relus:
             weight_init.c2_msra_fill(layer)
+        weight_init.c2_msra_fill(self.deconv)
         # use normal distribution initialization for mask prediction layer
         nn.init.normal_(self.predictor.weight, std=0.001)
         if self.predictor.bias is not None:
