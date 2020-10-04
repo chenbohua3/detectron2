@@ -531,15 +531,14 @@ class StandardROIHeads(ROIHeads):
         self.box_predictor = box_predictor
 
         self.mask_on = mask_in_features is not None
-        if self.mask_on:
-            self.mask_in_features = mask_in_features
-            self.mask_pooler = mask_pooler
-            self.mask_head = mask_head
+        self.mask_in_features = mask_in_features
+        self.mask_pooler = mask_pooler
+        self.mask_head = mask_head
+
         self.keypoint_on = keypoint_in_features is not None
-        if self.keypoint_on:
-            self.keypoint_in_features = keypoint_in_features
-            self.keypoint_pooler = keypoint_pooler
-            self.keypoint_head = keypoint_head
+        self.keypoint_in_features = keypoint_in_features
+        self.keypoint_pooler = keypoint_pooler
+        self.keypoint_head = keypoint_head
 
         self.train_on_pred_boxes = train_on_pred_boxes
 
@@ -677,11 +676,13 @@ class StandardROIHeads(ROIHeads):
         """
         del images
         if self.training:
+            assert not torch.jit.is_scripting()
             assert targets
             proposals = self.label_and_sample_proposals(proposals, targets)
         del targets
 
         if self.training:
+            assert not torch.jit.is_scripting()
             losses = self._forward_box(features, proposals)
             # Usually the original proposals used by the box head are used by the mask, keypoint
             # heads. But when `self.train_on_pred_boxes is True`, proposals will contain boxes
@@ -723,9 +724,7 @@ class StandardROIHeads(ROIHeads):
         instances = self._forward_keypoint(features, instances)
         return instances
 
-    def _forward_box(
-        self, features: Dict[str, torch.Tensor], proposals: List[Instances]
-    ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
+    def _forward_box(self, features: Dict[str, torch.Tensor], proposals: List[Instances]):
         """
         Forward logic of the box prediction branch. If `self.train_on_pred_boxes is True`,
             the function puts predicted boxes in the `proposal_boxes` field of `proposals` argument.
@@ -749,6 +748,7 @@ class StandardROIHeads(ROIHeads):
         del box_features
 
         if self.training:
+            assert not torch.jit.is_scripting()
             losses = self.box_predictor.losses(predictions, proposals)
             # proposals is modified in-place below, so losses must be computed first.
             if self.train_on_pred_boxes:
@@ -763,9 +763,7 @@ class StandardROIHeads(ROIHeads):
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
             return pred_instances
 
-    def _forward_mask(
-        self, features: Dict[str, torch.Tensor], instances: List[Instances]
-    ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
+    def _forward_mask(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
         Forward logic of the mask prediction branch.
 
@@ -781,9 +779,16 @@ class StandardROIHeads(ROIHeads):
             In inference, update `instances` with new fields "pred_masks" and return it.
         """
         if not self.mask_on:
-            return {} if self.training else instances
+            if self.training:
+                assert not torch.jit.is_scripting()
+                return {}
+            else:
+                return instances
+
+        assert self.mask_head is not None
 
         if self.training:
+            assert not torch.jit.is_scripting()
             # head is only trained on positive proposals.
             instances, _ = select_foreground_proposals(instances, self.num_classes)
 
@@ -792,12 +797,13 @@ class StandardROIHeads(ROIHeads):
             boxes = [x.proposal_boxes if self.training else x.pred_boxes for x in instances]
             features = self.mask_pooler(features, boxes)
         else:
-            features = {f: features[f] for f in self.mask_in_features}
+            new_feat = {}
+            for f in self.mask_in_features:
+                new_feat[f] = features[f]
+            features = new_feat
         return self.mask_head(features, instances)
 
-    def _forward_keypoint(
-        self, features: Dict[str, torch.Tensor], instances: List[Instances]
-    ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
+    def _forward_keypoint(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
         Forward logic of the keypoint prediction branch.
 
@@ -813,9 +819,16 @@ class StandardROIHeads(ROIHeads):
             In inference, update `instances` with new fields "pred_keypoints" and return it.
         """
         if not self.keypoint_on:
-            return {} if self.training else instances
+            if self.training:
+                assert not torch.jit.is_scripting()
+                return {}
+            else:
+                return instances
+
+        assert self.keypoint_head is not None
 
         if self.training:
+            assert not torch.jit.is_scripting()
             # head is only trained on positive proposals with >=1 visible keypoints.
             instances, _ = select_foreground_proposals(instances, self.num_classes)
             instances = select_proposals_with_visible_keypoints(instances)
@@ -825,5 +838,8 @@ class StandardROIHeads(ROIHeads):
             boxes = [x.proposal_boxes if self.training else x.pred_boxes for x in instances]
             features = self.keypoint_pooler(features, boxes)
         else:
-            features = {f: features[f] for f in self.keypoint_in_features}
+            new_feat = {}
+            for f in self.keypoint_in_features:
+                new_feat[f] = features[f]
+            features = new_feat
         return self.keypoint_head(features, instances)
