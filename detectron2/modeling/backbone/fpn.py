@@ -1,6 +1,8 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import math
+from typing import Dict
 import fvcore.nn.weight_init as weight_init
+import torch
 import torch.nn.functional as F
 from torch import nn
 
@@ -84,8 +86,8 @@ class FPN(Backbone):
             output_convs.append(output_conv)
         # Place convs into top-down order (from low to high resolution)
         # to make the top-down computation in forward clearer.
-        self.lateral_convs = lateral_convs[::-1]
-        self.output_convs = output_convs[::-1]
+        self.lateral_convs = nn.ModuleList(lateral_convs[::-1])
+        self.output_convs = nn.ModuleList(output_convs[::-1])
         self.top_block = top_block
         self.in_features = in_features
         self.bottom_up = bottom_up
@@ -125,23 +127,30 @@ class FPN(Backbone):
         results = []
         prev_features = self.lateral_convs[0](x[0])
         results.append(self.output_convs[0](prev_features))
-        for features, lateral_conv, output_conv in zip(
-            x[1:], self.lateral_convs[1:], self.output_convs[1:]
+        for i, (lateral_conv, output_conv) in enumerate(
+            zip(self.lateral_convs[1:], self.output_convs[1:])
         ):
-            top_down_features = F.interpolate(prev_features, scale_factor=2, mode="nearest")
-            lateral_features = lateral_conv(features)
+            features = x[i + 1]
+            top_down_features = F.interpolate(prev_features, scale_factor=2.0, mode="nearest")
+            # https://github.com/pytorch/pytorch/issues/38034
+            lateral_features = lateral_conv.forward(features)
             prev_features = lateral_features + top_down_features
             if self._fuse_type == "avg":
                 prev_features /= 2
-            results.insert(0, output_conv(prev_features))
+            results.insert(0, output_conv.forward(prev_features))
 
         if self.top_block is not None:
-            top_block_in_feature = bottom_up_features.get(self.top_block.in_feature, None)
-            if top_block_in_feature is None:
+            # torchscript does not support None as the default value of the function get
+            if self.top_block.in_feature in bottom_up_features:
+                top_block_in_feature = bottom_up_features[self.top_block.in_feature]
+            else:
                 top_block_in_feature = results[self._out_features.index(self.top_block.in_feature)]
             results.extend(self.top_block(top_block_in_feature))
         assert len(self._out_features) == len(results)
-        return dict(zip(self._out_features, results))
+        res = {}
+        for f, r in zip(self._out_features, results):
+            res[f] = r
+        return res
 
     def output_shape(self):
         return {

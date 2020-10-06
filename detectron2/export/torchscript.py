@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import torch
 
 # need an explicit import due to https://github.com/pytorch/pytorch/issues/38964
-from detectron2.structures import Boxes, Instances  # noqa F401
+from detectron2.structures import Boxes, ImageList, Instances  # noqa F401
 
 _counter = 0
 
@@ -199,6 +199,49 @@ class {cls_name}:
                 "No attribute named {{}} in {cls_name}".format(name)
             setattr(new_instances, name, deepcopy(val))
         return new_instances
+"""
+    )
+
+    # support function attribute `to`
+    lines.append(
+        f"""
+    def to(self, devices: torch.device) -> "{cls_name}":
+        ret = {cls_name}(self.image_size)
+"""
+    )
+    for name, type_ in fields.items():
+        lines.append(
+            f"""
+        t = self._{name}
+"""
+        )
+        if type_ == "Boxes":
+            lines.append(
+                f"""
+        if t is not None:
+            tmp_t = Boxes(t.tensor.to(devices))
+            ret._{name} = tmp_t
+"""
+            )
+        elif type_ == "Tensor":
+            lines.append(
+                f"""
+        if t is not None:
+            tmp_t = t.to(devices)
+            ret._{name} = tmp_t
+    """
+            )
+        else:
+            lines.append(
+                f"""
+        if t is not None and hasattr(t, "to"):
+            tmp_t = t.to(devices)
+            ret._{name} = tmp_t
+"""
+            )
+    lines.append(
+        """
+        return ret
 """
     )
     return cls_name, os.linesep.join(lines)
